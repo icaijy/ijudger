@@ -1,6 +1,6 @@
 {
     "time_limit": 1,
-    "memory_limit": 11,
+    "memory_limit": 128,
     "test_case_count": 2,
     "test_cases": [
         {
