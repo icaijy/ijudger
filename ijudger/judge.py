@@ -28,7 +28,7 @@ def run_with_isolate(source_path, input_data, time_limit, memory_limit=None, lan
     input_file = os.path.join(BOX_PATH, "input.txt")
     output_file = os.path.join(BOX_PATH, "output.txt")
     error_file = os.path.join(BOX_PATH, "error.txt")
-    meta_file = os.path.join(BOX_PATH, "meta.txt")
+    meta_file = "./meta.txt"
 
     # 写入输入
     with open(input_file, "w") as f:
@@ -38,7 +38,7 @@ def run_with_isolate(source_path, input_data, time_limit, memory_limit=None, lan
     if language=="cpp":
         ok, err = compile_cpp(source_path, box_exe)
         if not ok:
-            return "", 0.0, -1, err, {}
+            return "CE", 0.0, -1, err, {}
         os.chmod(box_exe, 0o755)
     else:
         # 读取原源码
@@ -78,8 +78,8 @@ def run_with_isolate(source_path, input_data, time_limit, memory_limit=None, lan
     time_used = float(meta.get("time", "0") or 0.0)
 
     # cleanup
-    # subprocess.run([ISOLATE_BIN, f"--box-id={BOX_ID}", "--cleanup"],
-    #                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run([ISOLATE_BIN, f"--box-id={BOX_ID}", "--cleanup"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return user_output, time_used, exitcode, err_output, meta
 
 
@@ -97,17 +97,22 @@ def judge(problem_json_path, source_code_path, language):
         output, t, exitcode, err, meta = run_with_isolate(
             source_code_path, case["input"], time_limit, memory_limit, language
         )
-
-        status = "IE"
-        if meta.get("status")=="TO": status="TLE"
-        elif meta.get("status") in ["RE","SG"]: status="RE"
-        elif meta.get("status")=="XX": status="IE"
+        if (output=='CE'):
+            results.append({"status":"CE","time":round(t,3),"error":err.strip()})
+            return results
+        status = "UKE"
+        max_rss = int(meta.get("max-rss", "0"))
+        if meta.get("status")=="TO":
+            status="TLE"
+        elif "status"  in meta:
+            status="RE/MLE"
         else:
             if "status" not in meta:
-                if exitcode != 0: status="RE"
+                if exitcode != 0: status="RE/MLE"
                 else: status="AC" if output.strip()==case["output"].strip() else "WA"
             else:
                 status="AC" if output.strip()==case["output"].strip() else "WA"
+
 
         results.append({"status":status,"time":round(t,3),"error":err.strip()})
 
@@ -124,7 +129,7 @@ if __name__ == "__main__":
         print(f"C++ Test case {i}: {r}")
 
     # Python 测试
-    source_code = "../test/aplusb.py"
-    res = judge(problem_json, source_code, "py")
-    for i,r in enumerate(res):
-        print(f"Python Test case {i}: {r}")
+    # source_code = "../test/aplusb.py"
+    # res = judge(problem_json, source_code, "py")
+    # for i,r in enumerate(res):
+    #     print(f"Python Test case {i}: {r}")
