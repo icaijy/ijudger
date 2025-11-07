@@ -1,15 +1,16 @@
-import os
-import json
-import subprocess
-import tempfile
-import time
-import shutil
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import os, json, subprocess, shutil
+
+ISOLATE_BIN = "isolate"
+BOX_ID = 1
+BOX_PATH = f"/var/local/lib/isolate/{BOX_ID}/box"
 
 def compile_cpp(source_path, exe_path):
     try:
         result = subprocess.run(
             ["g++", "-O2", "-std=c++17", source_path, "-o", exe_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20
         )
         if result.returncode != 0:
             return False, result.stderr
@@ -17,111 +18,113 @@ def compile_cpp(source_path, exe_path):
     except subprocess.TimeoutExpired:
         return False, "Compilation timed out"
 
-def run_with_firejail(executable, input_data, time_limit, memory_limit=None, is_python=False):
-    with tempfile.NamedTemporaryFile(mode='w+', delete=False) as fin, \
-         tempfile.NamedTemporaryFile(mode='w+', delete=False) as fout, \
-         tempfile.NamedTemporaryFile(mode='w+', delete=False) as ferr:
+def run_with_isolate(source_path, input_data, time_limit, memory_limit=None, language="cpp"):
+    # 初始化干净 box
+    subprocess.run([ISOLATE_BIN, f"--box-id={BOX_ID}", "--init"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        fin.write(input_data)
-        fin.flush()
+    exe_name = "prog" if language=="cpp" else "prog.py"
+    box_exe = os.path.join(BOX_PATH, exe_name)
+    input_file = os.path.join(BOX_PATH, "input.txt")
+    output_file = os.path.join(BOX_PATH, "output.txt")
+    error_file = os.path.join(BOX_PATH, "error.txt")
+    meta_file = os.path.join(BOX_PATH, "meta.txt")
 
-        if is_python:
-            run_cmd = f"ulimit -v {memory_limit*1024 if memory_limit else 'unlimited'}; exec python3 -u {executable}"
-        else:
-            run_cmd = f"ulimit -v {memory_limit*1024 if memory_limit else 'unlimited'}; exec {executable}"
+    # 写入输入
+    with open(input_file, "w") as f:
+        f.write(input_data)
 
-        cmd = ["firejail", "--quiet", "bash", "-c", run_cmd]
+    # 准备可执行文件
+    if language=="cpp":
+        ok, err = compile_cpp(source_path, box_exe)
+        if not ok:
+            return "", 0.0, -1, err, {}
+        os.chmod(box_exe, 0o755)
+    else:
+        # 读取原源码
+        with open(source_path, "r", encoding="utf-8") as f:
+            source_code = f.read()
+        # 自动加上 shebang 和编码声明
+        header = "#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n"
+        with open(box_exe, "w", encoding="utf-8") as f:
+            f.write(header + source_code)
+        os.chmod(box_exe, 0o755)
 
-        start_time = time.time()
-        try:
-            result = subprocess.run(
-                cmd,
-                stdin=open(fin.name, 'r'),
-                stdout=open(fout.name, 'w'),
-                stderr=open(ferr.name, 'w'),
-                timeout=time_limit
-            )
-            end_time = time.time()
-        except subprocess.TimeoutExpired:
-            os.unlink(fin.name)
-            os.unlink(fout.name)
-            os.unlink(ferr.name)
-            return "TLE", time_limit, None, ""
-        except Exception:
-            os.unlink(fin.name)
-            os.unlink(fout.name)
-            os.unlink(ferr.name)
-            return "RE", 0, None, ""
+    # 构造命令，--run 后直接写文件名
+    cmd = [
+        ISOLATE_BIN, f"-b {BOX_ID}",
+        "--run",
+        "--stdin=input.txt", "--stdout=output.txt",
+        "--stderr=error.txt", "--meta=meta.txt",
+        f"--time={time_limit}", "--silent", f"--mem={memory_limit*1024}"
+    ]
+    cmd.append(f"./{exe_name}" if language=="cpp" else exe_name)
 
-        with open(fout.name, 'r') as f:
-            user_output = f.read()
-        with open(ferr.name, 'r') as f:
-            err_output = f.read()
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-        returncode = result.returncode
+    user_output = open(output_file).read() if os.path.exists(output_file) else ""
+    err_output = proc.stderr or ""
+    if os.path.exists(error_file):
+        err_output += ("\n" + open(error_file).read()).lstrip("\n")
 
-        os.unlink(fin.name)
-        os.unlink(fout.name)
-        os.unlink(ferr.name)
+    meta = {}
+    if os.path.exists(meta_file):
+        for line in open(meta_file):
+            if ':' in line:
+                k, v = line.strip().split(':', 1)
+                meta[k] = v
 
-        return user_output, end_time-start_time, returncode, err_output
+    exitcode = int(meta.get("exitcode", proc.returncode if proc.returncode is not None else 0))
+    time_used = float(meta.get("time", "0") or 0.0)
+
+    # cleanup
+    # subprocess.run([ISOLATE_BIN, f"--box-id={BOX_ID}", "--cleanup"],
+    #                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return user_output, time_used, exitcode, err_output, meta
+
 
 def judge(problem_json_path, source_code_path, language):
     with open(problem_json_path, 'r') as f:
         problem = json.load(f)
 
     time_limit = problem["time_limit"]
-    memory_limit = problem.get("memory_limit", None)
+    memory_limit = problem["memory_limit"]
     test_cases = problem["test_cases"]
 
-    tmp_dir = tempfile.mkdtemp()
     results = []
 
-    exe_path = os.path.join(tmp_dir, "prog")
-    if language == "cpp":
-        ok, err = compile_cpp(source_code_path, exe_path)
-        if not ok:
-            shutil.rmtree(tmp_dir)
-            return [{"status":"CE", "time":0, "error":err}]
-        is_python = False
-    elif language == "py":
-        exe_path = source_code_path
-        is_python = True
-    else:
-        shutil.rmtree(tmp_dir)
-        raise ValueError("Unsupported language")
-
     for case in test_cases:
-        input_data = case["input"]
-        expected_output = case["output"]
+        output, t, exitcode, err, meta = run_with_isolate(
+            source_code_path, case["input"], time_limit, memory_limit, language
+        )
 
-        output, t, returncode, err = run_with_firejail(exe_path, input_data, time_limit, memory_limit, is_python)
-        if output == "TLE":
-            status = "TLE"
-        elif returncode != 0:
-            status = "RE/MLE"
+        status = "IE"
+        if meta.get("status")=="TO": status="TLE"
+        elif meta.get("status") in ["RE","SG"]: status="RE"
+        elif meta.get("status")=="XX": status="IE"
         else:
-            status = "AC" if output.strip() == expected_output.strip() else "WA"
+            if "status" not in meta:
+                if exitcode != 0: status="RE"
+                else: status="AC" if output.strip()==case["output"].strip() else "WA"
+            else:
+                status="AC" if output.strip()==case["output"].strip() else "WA"
 
+        results.append({"status":status,"time":round(t,3),"error":err.strip()})
 
-        results.append({
-            "status": status,
-            "time": round(t, 3),
-            "error": err
-        })
-
-    shutil.rmtree(tmp_dir)
     return results
 
+
 if __name__ == "__main__":
-    problem_json = "aplusb.json"
-    source_code = "aplusb.cpp"
-    lang = "cpp"
-    res = judge(problem_json, source_code, lang)
-    for i, r in enumerate(res):
+    problem_json = "../test/aplusb.json"
+
+    # C++ 测试
+    source_code = "../test/aplusb.cpp"
+    res = judge(problem_json, source_code, "cpp")
+    for i,r in enumerate(res):
         print(f"C++ Test case {i}: {r}")
-    source_code = "aplusb.py"
-    lang = "py"
-    res = judge(problem_json, source_code, lang)
-    for i, r in enumerate(res):
+
+    # Python 测试
+    source_code = "../test/aplusb.py"
+    res = judge(problem_json, source_code, "py")
+    for i,r in enumerate(res):
         print(f"Python Test case {i}: {r}")
