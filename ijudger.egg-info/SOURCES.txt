@@ -1,5 +1,6 @@
 README.md
 pyproject.toml
+setup.py
 ijudger/__init__.py
 ijudger/judge.py
 ijudger/makejson.py
